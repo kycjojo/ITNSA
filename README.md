@@ -1,383 +1,294 @@
-# Konsep & Mental Model Kisi-Kisi Lomba ITNSA (IT Network System Administration)
+# Panduan Kisi-Kisi Lomba ITNSA (Versi Mudah Dipahami & Bahasa Santai)
 
-> **Catatan Filosofi Lomba**:  
-> Di lomba ITNSA (LKS SMK / WorldSkills), **konfigurasi sintaks (IP, nama domain, nama user, port) akan selalu berbeda di setiap studi kasus**. Menghafal skrip konfigurasi baris-per-baris adalah kesalahan fatal. Kunci kemenangan seorang *system administrator* adalah memahami **prinsip kerja arsitektur (*under the hood*)**, **aliran paket data**, **alasan fungsional teknologi tersebut diujikan**, serta **bagaimana juri menguji sistem Anda secara otomatis**.
-
----
-
-## Daftar Isi
-1. [Mindset Juara & Cara Penilaian Juri LKS ITNSA](#1-mindset-juara--cara-penilaian-juri-lks-itnsa)
-2. [Linux Dasar & Ubuntu 24.04 LTS (Noble Numbat)](#2-linux-dasar--ubuntu-2404-lts-noble-numbat)
-3. [Domain Name System (DNS Server - BIND9)](#3-domain-name-system-dns-server---bind9)
-4. [Git Dasar & Automated Deployment Workflow](#4-git-dasar--automated-deployment-workflow)
-5. [Web Server (Nginx / Apache Architecture)](#5-web-server-nginx--apache-architecture)
-6. [Reverse Proxy & Traffic Management](#6-reverse-proxy--traffic-management)
-7. [SSL / TLS & Let's Encrypt (Certbot / Offline CA)](#7-ssl--tls--lets-encrypt-certbot--offline-ca)
-8. [Proxmox VE: Arsitektur Virtualisasi & Data Center Tiering](#8-proxmox-ve-arsitektur-virtualisasi--data-center-tiering)
-   - [LXC (Linux Containers)](#lxc-linux-containers)
-   - [Firewall Multi-Level](#firewall-multi-level)
-   - [User Management & RBAC Privilege](#user-management--rbac-privilege)
-   - [Backup & Disaster Recovery (VZDump)](#backup--disaster-recovery-vzdump)
-   - [VLAN Architecture di Hypervisor](#vlan-architecture-di-hypervisor)
-9. [Bedah Skenario & Prediksi Varian Soal Lomba](#9-bedah-skenario--prediksi-varian-soal-lomba)
-10. [Framework Problem Solving & Debugging Berbasis OSI Layer](#10-framework-problem-solving--debugging-berbasis-osi-layer)
+> 💡 **Prinsip Utama Lomba ITNSA**:  
+> Di lomba ITNSA (LKS / WorldSkills), **soal dan angka (IP, nama domain, port) akan selalu berubah-ubah di setiap lomba**.  
+> Jangan menghafal baris perintah! Pahami **"Benda ini fungsinya apa?"**, **"Kenapa juri menyuruh pasang ini?"**, dan **"Gimana cara juri ngecek kalau kerjaan kita bener?"**.
 
 ---
 
-## 1. Mindset Juara & Cara Penilaian Juri LKS ITNSA
+## Peta Cepat: Analogi Dunia Nyata
 
-Dalam kompetisi ITNSA, penilaian didasarkan pada empat pilar WorldSkills:
+Biar langsung kebayang, bayangkan seluruh sistem yang kita bangun di lomba itu seperti **Satu Kompleks Perkantoran Modern**:
 
-1. **Automated Verification (Black-Box Testing)**:  
-   Juri jarang memeriksa file konfigurasi Anda secara manual. Mereka menggunakan script otomatis (seperti Python Testinfra, Ansible, Bash test suites) dari host juri. Script tersebut mengirimkan *probe*:
-   - Apakah port terbuka?
-   - Apakah DNS merespon query dalam <50ms?
-   - Apakah header HTTP mengandung `X-Forwarded-For`?
-   - Apakah status code mengembalikan 301 Redirect ke HTTPS?
-2. **Service Persistence (Reboot Survival)**:  
-   Sebelum penilaian akhir dimulai, juri akan mengeksekusi `reboot` pada server host dan seluruh container. Jika sebuah service tidak di-`enable` di systemd, atau konfigurasi network tidak persisten di file Netplan, skor untuk service tersebut bernilai **0**.
-3. **Pemisahan Tugas & Segregasi (Isolation & Least Privilege)**:  
-   Kenapa soal memisahkan service ke dalam beberapa container dan VLAN yang berbeda? Tujuannya adalah menguji pemahaman Anda tentang konsep **Defense-in-Depth**. Jika satu container web dieksploitasi, hacker tidak boleh langsung bisa melihat database atau host Proxmox.
-4. **Idempotensi & Reproducibility**:  
-   Setiap konfigurasi yang Anda buat harus bisa diulang dan stabil, bukan hasil manipulasi sementara di memory RAM.
-
----
-
-## 2. Linux Dasar & Ubuntu 24.04 LTS (Noble Numbat)
-
-### A. Konsep Fundamental & Cara Kerja *Under the Hood*
-Ubuntu 24.04 LTS membawa perubahan arsitektur internal yang signifikan:
-- **Netplan v2 Abstraction Layer**: Konfigurasi jaringan di Ubuntu bukan lagi berupa skrip ifupdown lawas (`/etc/network/interfaces`), melainkan deklarasi YAML yang di-render menjadi konfigurasi tingkat rendah untuk daemon backend: **systemd-networkd** (default di server) atau **NetworkManager** (default di desktop).
-- **Systemd Init & Unit Lifecycle**: Systemd adalah process ID 1 (`PID 1`). Ia mengelola dependensi antar-service menggunakan target pohon graph. Menjalankan `systemctl start` hanya menyalakan service di sesi RAM saat ini; hanya `systemctl enable` yang membuat symlink ke `/etc/systemd/system/*.wants/` agar service hidup kembali pasca boot.
-- **Security Defaults (AppArmor 4 & Restricted Namespaces)**: Ubuntu 24.04 memperketat izin eksekusi unprivileged user namespace, memengaruhi bagaimana container atau software tertentu (seperti sandbox aplikasi) dijalankan.
-- **Systemd-resolved Stub Listener**: Secara default, Ubuntu 24.04 mengaktifkan resolver DNS caching internal yang mengikat (*bind*) IP `127.0.0.53` pada port 53.
-
-### B. Peruntukan & Skenario di Lomba
-1. **Pondasi Node**: Menjadi OS guest utama untuk semua LXC Container atau VM (Web, DNS, Database, Proxy).
-2. **Uji Resolusi Dependensi**: Juri sengaja meminta service yang membutuhkan koneksi database. Jika service Anda start sebelum jaringan/database siap, service akan crash saat boot. Anda harus memahami parameter `After=network-online.target` dan `Restart=on-failure`.
-3. **Manajemen Hak Akses & Sudoers**: Soal lomba biasanya melarang penggunaan login langsung sebagai user `root` via SSH, dan meminta pembuatan user kompetisi atau auditor yang hanya memiliki hak eksekusi sudo untuk perintah tertentu (least privilege).
-
-### C. Titik Kritis & Jebakan Penilaian (Pitfalls)
-- **Konflik Port 53 BIND9**: Saat memasang BIND9 di Ubuntu 24.04, instalasi sering gagal start karena port 53 sudah dipegang oleh `systemd-resolved`. Admin harus tahu cara mendisentralisasi DNS Stub Resolver tanpa merusak kemampuan resolving OS lokal.
-- **Spasi Tab pada YAML Netplan**: Kesalahan satu karakter spasi atau penggunaan karakter Tab (`\t`) akan membuat parser Netplan error, yang menyebabkan antarmuka jaringan gagal diinisialisasi pasca-reboot.
+| Topik | Analogi Dunia Nyata | Fungsi Utamanya |
+|---|---|---|
+| **Proxmox VE** | **Gedung Apartemen / Perkantoran** | Tempat mendirikan banyak ruangan/server di dalam 1 komputer fisik. |
+| **LXC** | **Kamar Kos / Bilik Kantor** | Ruangan server yang hemat tempat, ringan, dan cepat dibangun. |
+| **VLAN** | **Lorong Khusus / Lift Ber-Kartu Akses** | Jalur khusus agar tamu umum tidak bisa nyasar ke ruang brankas rahasia. |
+| **Firewall** | **Pos Satpam & Pintu Gerbang** | Menyaring siapa yang boleh masuk dan siapa yang langsung ditendang keluar. |
+| **User Management** | **Kartu Tanda Pengenal (ID Card)** | Menentukan siapa bos (Admin) dan siapa yang cuma boleh lihat-lihat (Auditor/Juri). |
+| **Backup** | **Kotak Brankas Penyelamat** | Kloningan cadangan jika sewaktu-waktu ruangan hancur/rusak. |
+| **Linux & Ubuntu 24** | **Sistem Operasi / Fondasi Lantai** | Bahasa dasar yang dipakai setiap komputer di dalam ruangan. |
+| **Domain (DNS)** | **Buku Telepon Kontak HP** | Mengubah nama gampang (`web.id`) jadi nomor IP rumit (`192.168.1.10`). |
+| **Git Dasar** | **Kurir Mesin Waktu** | Pengantar file kodingan aplikasi web dari gudang ke server. |
+| **Web Server** | **Dapur & Meja Kasir** | Yang menyiapkan dan menyajikan halaman web saat diminta pengunjung. |
+| **Reverse Proxy** | **Resepsionis di Lobi Depan** | Tamu tidak boleh langsung masuk dapur, resepsionis yang mengambilkan makanan dari dapur untuk tamu. |
+| **SSL Let's Encrypt** | **Surat Bersegel Resmi / Gembok Pengaman** | Menjamin paket data dibungkus rapi dan tidak bisa diintip orang di jalan. |
 
 ---
 
-## 3. Domain Name System (DNS Server - BIND9)
+## 1. Linux Dasar & Ubuntu 24.04 LTS
 
-### A. Konsep Fundamental & Cara Kerja *Under the Hood*
-DNS adalah database terdistribusi hierarkis berbentuk pohon (tree) terbalik:
-- **Authoritative Nameserver vs Recursive Resolver**:
-  - *Authoritative*: Memegang data resmi (*source of truth*) untuk sebuah zone domain (misal: mesin Anda bertanggung jawab penuh atas data `itnsa.id`).
-  - *Recursive Resolver*: Mencari jawaban dari root nameserver (`.`), TLD (`.id`), hingga ke authoritative server, lalu menyimpannya dalam cache.
-- **Forward Lookup vs Reverse Lookup**:
-  - *Forward*: FQDN $\rightarrow$ IP Address (Record A untuk IPv4, AAAA untuk IPv6).
-  - *Reverse*: IP Address $\rightarrow$ FQDN menggunakan domain semu `in-addr.arpa` (Record PTR). Reverse DNS sangat krusial di dunia enterprise untuk verifikasi anti-spoofing dan logging audit.
-- **Anatomi Record DNS**:
-  - `SOA` (Start of Authority): Menyimpan informasi zona, email admin, dan **Serial Number**. Jika serial number tidak dinaikkan, secondary DNS server tidak akan mereplikasi perubahan data.
-  - `CNAME` (Canonical Name): Alias untuk nama domain lain. *Aturan penting*: Nama yang memiliki CNAME tidak boleh memiliki record lain (seperti MX atau TXT).
-  - `Forwarders`: Jika server diminta mencari domain di luar zone miliknya (misal `google.com`), query akan diteruskan ke IP upstream (seperti `8.8.8.8`).
+### 🏢 Ibaratnya Apa?
+Ibarat **pondasi dan aturan tata tertib gedung**. Semua server yang akan kita buat berjalan di atas sistem operasi Linux.
 
-### B. Peruntukan & Skenario di Lomba
-1. **Tulang Punggung Infrastruktur (Backbone)**:
-   Di lomba ITNSA, DNS adalah komponen pertama yang wajib berjalan sempurna. Seluruh konfigurasi berikutnya (Nginx VirtualHost, Reverse Proxy upstream, Git clone remote, SSL certificate verification) bergantung pada nama domain.
-2. **Kemandirian Jaringan (Offline Resilience)**:
-   Sering kali lomba diadakan di lingkungan intranet terisolasi. DNS internal bertugas menjamin semua node dapat saling berkomunikasi tanpa bergantung pada koneksi internet luar.
-3. **Efek Domino Nilai**:
-   Jika DNS Anda bermasalah, script penilaian otomatis juri yang memanggil `curl http://app.itnsa.id` akan langsung *timeout* pada tahap lookup, mengakibatkan nilai modul Web Server dan SSL ikut jatuh menjadi 0 meskipun konfigurasi Nginx Anda sempurna.
+### 🧠 Sebenarnya Ini Apa & Cara Kerjanya?
+Linux adalah sistem operasi berbasis teks (Command Line / CLI) yang menjadi standar server dunia. Ubuntu 24.04 LTS adalah versi jangka panjang terbaru.
+Ada 4 hal dasar yang paling penting dipahami:
+1. **User & Hak Akses (Permission)**:  
+   Linux sangat ketat soal hak milik. File web harus bisa dibaca oleh sistem web (`www-data`), tapi file sensitif seperti kunci enkripsi cuma boleh dibaca oleh `root`.
+2. **Service / Systemd**:  
+   Program di server berjalan di latar belakang (*background*). Perintah `systemctl start` hanya menyalakan sekarang (kalau PC dimatikan, aplikasinya mati lagi). Perintah `systemctl enable` menyuruh komputer: *"Tiap kali kamu menyala, otomatis langsung jalankan aplikasi ini!"*.
+3. **Netplan (Pengatur IP di Ubuntu)**:  
+   File YAML di `/etc/netplan/` adalah tempat menentukan alamat IP server, gerbang keluar (*gateway*), dan DNS.
+4. **Perubahan di Ubuntu 24 LTS**:  
+   Secara default, Ubuntu 24 punya fitur internal bernama `systemd-resolved` yang otomatis memegang Port 53 (port DNS).
 
-### C. Titik Kritis & Jebakan Penilaian (Pitfalls)
-- **Trailing Dot (`.`)**:
-  Di BIND9, lupa menuliskan tanda titik di akhir FQDN (contoh: menulis `web.itnsa.id` alih-alih `web.itnsa.id.`) akan membuat BIND9 otomatis menganggap itu subdomain relatif, menghasilkan nama konyol seperti `web.itnsa.id.itnsa.id.`
-- **DNSSEC Validation di Jaringan Offline**:
-  Secara default BIND9 mengaktifkan `dnssec-validation auto`. Jika server berada di lab tertutup tanpa akses ke root keys internet, resolving domain lokal sering kali gagal dengan status `SERVFAIL`. Menonaktifkan validasi DNSSEC atau mengonfigurasi trust anchor internal adalah trik wajib di lingkungan offline.
+### 🎯 Kenapa Ada di Soal Lomba?
+- Juri ingin melihat apakah Anda bisa mengoperasikan server tanpa bantuan tampilan mouse/GUI.
+- **Uji Persistensi**: Juri akan sengaja me-reboot komputer Anda di akhir lomba. Kalau setelah nyala IP Anda hilang atau servicenya mati, nilai Anda langsung 0.
+
+### ⚠️ Jebakan Maut Peserta Pemula
+- **Salah Menekan Tombol TAB di Netplan**: Format file YAML **anti-TAB**. Kalau Anda menekan tombol Tab di keyboard (bukan spasi), network akan langsung rusak dan server tidak bisa konek ke mana pun pasca-reboot.
+- **Port 53 Tabrakan**: Saat menginstall DNS server BIND9, sering error `Address already in use`. Penyebabnya adalah `systemd-resolved` bawaan Ubuntu 24 yang belum dimatikan.
 
 ---
 
-## 4. Git Dasar & Automated Deployment Workflow
+## 2. Domain (DNS Server - BIND9)
 
-### A. Konsep Fundamental & Cara Kerja *Under the Hood*
-Git bukan sekadar alat backup folder, melainkan sebuah Directed Acyclic Graph (DAG) dari snapshot konten:
-- **Tiga State Git**:
-  1. *Working Directory*: File nyata di disk yang sedang diedit.
-  2. *Staging Area (Index)*: Buffer persiapan snapshot berikutnya.
-  3. *Repository (.git)*: Database objek terkompresi (Blob, Tree, Commit) yang tidak dapat diubah (*immutable*).
-- **Branching & Detached HEAD**:
-  Branch hanyalah sebuah pointer (referensi teks ringan) yang menunjuk ke commit hash tertentu. Jika berpindah ke commit tanpa nama branch, Anda masuk ke kondisi *Detached HEAD* di mana perubahan baru tidak terikat ke branch mana pun.
-- **Git Hooks**:
-  Skrip lifecycle yang dieksekusi secara otomatis saat event tertentu terjadi (misal: `pre-commit`, `post-commit`, `post-receive`).
+### 🏢 Ibaratnya Apa?
+Ibarat **buku kontak di HP Anda**.  
+Otak manusia tidak bisa menghafal nomor telepon semua temannya (`0812-3456-7890`), kita lebih gampang mengingat nama ("Budi"). DNS bertugas mengubah nama gampang (`app.itnsa.id`) menjadi nomor alamat IP (`192.168.10.10`).
 
-### B. Peruntukan & Skenario di Lomba
-1. **Distribusi Source Code Aplikasi**:
-   Juri tidak lagi menyalin folder aplikasi lewat USB. Mereka menyediakan repositori git lokal (GitLab/Gitea/Bare repo) dan Anda diinstruksikan untuk menarik (*fetch/clone*) kode dari branch atau tag rilis tertentu (misal: branch `production`, tag `v1.2`).
-2. **Simulasi GitOps & Auto-Deployment**:
-   Soal lomba sering menguji pembuatan *deployment pipeline* mini: saat developer melakukan `git push` ke server, skrip hook `post-receive` di server otomatis menduplikasi file kerja ke direktori web (`/var/www/html`), mengatur hak akses user `www-data`, dan me-reload web server tanpa intervensi manual.
-3. **Audit Jejak Konfigurasi**:
-   Terkadang peserta diminta menginisialisasi repository git pada folder konfigurasi `/etc/` untuk merekam riwayat perubahan yang dilakukan selama kompetisi.
+### 🧠 Sebenarnya Ini Apa & Cara Kerjanya?
+DNS bekerja dengan konsep zona dan catatan (*records*):
+- **A Record**: Menghubungkan Nama $\rightarrow$ Alamat IPv4 (Contoh: `web.itnsa.id` $\rightarrow$ `192.168.10.10`).
+- **PTR Record (Reverse DNS)**: Kebalikannya, mengubah IP $\rightarrow$ Nama (biasanya dicek untuk keamanan server email dan audit).
+- **CNAME**: Nama panggilan / alias (Contoh: `portal.itnsa.id` ikuti saja alamatnya `web.itnsa.id`).
+- **Forwarder**: *"Kalau ada klien nanya domain internet yang saya nggak tahu (misal `google.com`), oper pertanyaan itu ke server 8.8.8.8"*.
 
-### C. Titik Kritis & Jebakan Penilaian (Pitfalls)
-- **Eksposur Folder `.git` ke Publik**:
-  Jika Anda melakukan clone langsung ke root direktori web server dan tidak memblokir akses ke `/.git`, siapa pun di jaringan bisa mengunduh seluruh source code dan riwayat commit. Juri sering menyisipkan *security audit check* untuk melihat apakah `http://domain.id/.git/HEAD` menghasilkan 403 Forbidden.
-- **Ownership Conflict (`root` vs `www-data`)**:
-  Menjalankan perintah `git pull` atau `git clone` menggunakan akun `root` akan membuat file web berpemilik `root:root`. Akibatnya, aplikasi web (PHP/NodeJS) gagal menulis file log atau mengunggah media karena tidak punya izin tulis.
+### 🎯 Kenapa Ada di Soal Lomba?
+DNS adalah **tulang punggung utama**. Di awal lomba, Anda wajib membangun DNS dulu.  
+Kenapa? Karena script penguji otomatis milik juri tidak akan mengakses web Anda lewat IP, tapi lewat nama domain (misal `curl https://app.itnsa.id`). Kalau DNS Anda mati, pengujian Web Server, Proxy, dan SSL akan **otomatis gagal total** (efek domino).
+
+### ⚠️ Jebakan Maut Peserta Pemula
+- **Lupa Titik di Akhir (`.`)**:  
+  Di file konfigurasi BIND9, kalau Anda menulis `ns1.itnsa.id` tanpa titik di belakang, sistem akan otomatis membaca itu sebagai `ns1.itnsa.id.itnsa.id`. Selalu akhiri nama FQDN dengan titik: `ns1.itnsa.id.`.
+- **Lupa Menaikkan Serial Number**:  
+  Kalau mengubah isi IP di DNS tapi lupa menaikkan angka `Serial`, perubahan Anda tidak akan dibaca oleh sistem.
 
 ---
 
-## 5. Web Server (Nginx / Apache Architecture)
+## 3. Git Dasar
 
-### A. Konsep Fundamental & Cara Kerja *Under the Hood*
-Web server bertugas menerima koneksi socket TCP layer 4, mem-parsing protokol HTTP layer 7, dan mengembalikan payload data (HTML, JSON, asset biner):
-- **Event-Driven Non-Blocking (Nginx) vs Process/Thread-Based (Apache)**:
-  - Nginx menggunakan satu master process dan beberapa *worker processes*. Setiap worker menangani ribuan koneksi secara asinkron menggunakan system call kernel (`epoll` di Linux). Ini membuatnya sangat hemat RAM dan tahan terhadap lonjakan traffic.
-  - Apache (dengan MPM Event/Worker) menggunakan pool proses dan thread untuk mengeksekusi request.
-- **Mekanisme Virtual Hosting (Server Blocks)**:
-  Satu server fisik dengan satu alamat IP dapat melayani puluhan website berbeda. Web server membedakannya dengan membaca **HTTP Header `Host`** yang dikirimkan oleh browser klien.
-- **Logika Lokasi & Resolusi File**:
-  Directive `root` menggabungkan URI request ke path folder di harddisk (`root /var/www; location /app` $\rightarrow$ `/var/www/app`). Sedangkan `alias` mengganti seluruh path yang cocok.
-- **FastCGI Protocol**:
-  Web server tidak bisa mengeksekusi bahasa pemrograman seperti PHP secara langsung. Nginx meneruskan request dinamis ke interpreter terpisah (seperti PHP-FPM) melalui protokol biner FastCGI via Unix Socket (`/run/php/...sock`) atau TCP port (`127.0.0.1:9000`).
+### 🏢 Ibaratnya Apa?
+Ibarat **mesin waktu sekaligus kurir pengantar barang**.  
+Git mencatat semua riwayat perubahan file dan bertugas mengantarkan file kodingan dari repository pusat (seperti GitHub/GitLab lokal) ke dalam folder server.
 
-### B. Peruntukan & Skenario di Lomba
-1. **Serving Production Assets**: Menghosting landing page, REST API, atau aplikasi kompetisi.
-2. **Kustomisasi Respon & Branding**: Mengonfigurasi halaman error khusus (404 Not Found, 502 Bad Gateway) agar tidak membocorkan versi web server (Information Disclosure prevention).
-3. **Restriksi & Hardening**: Menonaktifkan directory listing (`autoindex off`), menyembunyikan banner versi server (`server_tokens off`), dan membatasi method HTTP (hanya GET, POST, HEAD).
+### 🧠 Sebenarnya Ini Apa & Cara Kerjanya?
+- **Clone / Pull**: Mengambil salinan kode dari server pusat ke komputer kita.
+- **Branch**: Cabang pengerjaan. Misalnya branch `main` untuk kode uji coba, dan branch `production` untuk kode yang sudah siap dipakai di publik.
+- **Git Hook (`post-receive`)**: Robot pemicu otomatis. Begitu ada perintah *"push kode baru"*, robot ini langsung menyalin file baru itu ke folder `/var/www/html` tanpa perlu admin mengutak-atik server lagi.
 
-### C. Titik Kritis & Jebakan Penilaian (Pitfalls)
-- **Konflik `default_server`**:
-  Jika request datang tanpa header Host yang cocok, Nginx akan melemparnya ke server block pertama yang dibaca atau yang memiliki flag `default_server`. Ketidaktahuan tentang prioritas ini bisa membuat domain A menampilkan website domain B.
-- **Socket Permissions**:
-  PHP-FPM socket harus memiliki permission yang mengizinkan user web server (`www-data`) untuk membaca dan menulis socket tersebut. Jika mismatch, Nginx akan langsung memunculkan pesan `502 Bad Gateway`.
+### 🎯 Kenapa Ada di Soal Lomba?
+Di lomba modern, juri tidak lagi membagikan file website lewat flashdisk. Juri akan memberikan link repository Git. Anda disuruh:
+1. Menarik (*clone*) kode web dari branch tertentu (misal branch `release-v1`).
+2. Menyiapkan sistem agar ketika juri melakukan `git push` bahan ujian baru, website langsung terupdate otomatis.
+
+### ⚠️ Jebakan Maut Peserta Pemula
+- **File `.git` Ketinggalan di Folder Publik**:  
+  Kalau Anda meng-clone repo langsung ke `/var/www/html`, folder `.git` rahasia akan bisa diakses orang lain lewat browser (`http://web.id/.git`). Juri keamanan akan mengurangi nilai Anda karena ini celah kebocoran data.
+- **Salah User Pemilik**:  
+  Jika meng-clone menggunakan akun `root`, aplikasi web (PHP) tidak akan bisa menulis data karena pemilik filenya adalah `root`, bukan `www-data`.
 
 ---
 
-## 6. Reverse Proxy & Traffic Management
+## 4. Web Server (Nginx / Apache)
 
-### A. Konsep Fundamental & Cara Kerja *Under the Hood*
-Reverse proxy berdiri di depan satu atau beberapa backend server, bertindak sebagai gerbang tunggal yang menerima request dari internet publik:
+### 🏢 Ibaratnya Apa?
+Ibarat **koki dapur di restoran**.  
+Ketika pelanggan memesan menu (mengetik alamat web di browser), koki web server yang mengambilkan file HTML, gambar, atau memasak skrip PHP, lalu menyajikannya ke piring browser pengunjung.
+
+### 🧠 Sebenarnya Ini Apa & Cara Kerjanya?
+- **Virtual Host / Server Block**:  
+  Satu komputer server bisa menampung 10 website sekaligus dengan nama berbeda (`sekolah.id`, `toko.id`). Web server tahu harus menyajikan web yang mana dengan membaca **nama tujuan** yang dikirimkan oleh browser.
+- **Pemisahan Statis vs Dinamis**:  
+  File gambar/HTML disajikan langsung oleh Nginx (cepat dan ringan). File program rumit seperti PHP diserahkan ke program terpisah bernama **PHP-FPM**.
+- **Logika Lokasi & Akses**:  
+  Mengatur folder mana yang boleh dibuka umum dan folder mana yang ditolak (misal: mematikan intip folder / *autoindex*).
+
+### 🎯 Kenapa Ada di Soal Lomba?
+Untuk menguji kemampuan Anda menyajikan konten web yang rapi, cepat, dan aman. Juri biasanya menguji:
+- Apakah nama websitenya sesuai dengan instruksi?
+- Apakah halaman 404 Not Found sudah dikustomisasi?
+- Apakah script PHP bisa berjalan normal dan konek ke database?
+
+### ⚠️ Jebakan Maut Peserta Pemula
+- **Salah Default Server**:  
+  Saat ada 2 website di 1 server, jika pengaturannya salah, pengunjung yang membuka `website-A.id` malah nyasar melihat konten `website-B.id`.
+- **Izin Folder Rusak**:  
+  File web ditaruh di folder yang hak izinnya salah, sehingga browser menampilkan pesan error `403 Forbidden`.
+
+---
+
+## 5. Reverse Proxy
+
+### 🏢 Ibaratnya Apa?
+Ibarat **resepsionis di lobi gedung kantor**.  
+Tamu dari luar kota **tidak boleh langsung masuk ke ruang brankas atau dapur kantor**. Tamu hanya boleh bicara dengan resepsionis di lobi. Resepsionis yang akan berjalan ke belakang mengambilkan barang, lalu menyerahkannya ke tamu.
 
 ```
-[Klien Luar] 
-      │
-      ▼ (Port 80 / 443 Publik)
-[Reverse Proxy di DMZ] 
-      │ 
-      ├─ Mengganti IP Sumber menjadi IP Proxy
-      ├─ Menyisipkan Header X-Forwarded-*
-      ├─ Menghentikan Enkripsi SSL (SSL Termination)
-      │
-      ▼ (Port 8080 Internal Tanpa Enkripsi)
-[Backend Server di Subnet Privat]
+[Pengunjung Luar]
+       │
+       ▼ (Bicara hanya ke Resepsionis)
+ [REVERSE PROXY di Lobi / DMZ]
+       │
+       ▼ (Mengambil data di ruang privat)
+[Backend Server di Ruang Belakang]
 ```
 
-- **Alasan Pemisahan Arsitektur (DMZ Segregation)**:
-  Backend server (aplikasi bisnis, basis data) tidak boleh diberi IP publik atau akses langsung ke internet demi meminimalisir permukaan serangan (*attack surface*). Reverse proxy berada di zona semi-terbuka (DMZ) untuk menyaring traffic.
-- **Masalah Header & IP Klien**:
-  Secara teknis, ketika reverse proxy meneruskan paket ke backend, backend melihat koneksi TCP tersebut datang dari IP reverse proxy, bukan dari klien asli. Oleh karena itu, reverse proxy wajib merekonstruksi header HTTP:
-  - `X-Real-IP`: IP asli browser klien.
-  - `X-Forwarded-For`: Daftar rantai IP yang dilalui paket.
-  - `X-Forwarded-Proto`: Memberi tahu backend apakah klien awal menggunakan protokol HTTP atau HTTPS.
-- **Load Balancing Algorithm**:
-  - *Round Robin*: Membagi beban berurutan secara merata.
-  - *Least Connections*: Mengarahkan request ke backend yang sedang memiliki koneksi aktif paling sedikit.
-  - *IP Hash*: Menjamin klien dengan IP yang sama akan selalu diarahkan ke backend yang sama (membantu mempertahankan *session state* tanpa Redis/memcached).
+### 🧠 Sebenarnya Ini Apa & Cara Kerjanya?
+Reverse proxy (biasanya memakai Nginx) dipasang di baris paling depan (jaringan publik/DMZ). Server aplikasi asli disembunyikan di jaringan belakang (privat).
+Tugas penting Reverse Proxy:
+1. **Penyambung Lidah (Forwarding)**: Menerima request di port 80/443, lalu meneruskannya ke port internal (misal port 8080 di server belakang).
+2. **Titip Catatan Identitas (Headers)**:  
+   Karena server belakang hanya melihat koneksi dari si Resepsionis, proxy wajib menyisipkan catatan kecil: *"Pak Backend, ini yang minta aslinya pengunjung dengan IP 202.10.x.x ya!"* (Header `X-Real-IP` dan `X-Forwarded-For`).
+3. **Pembagi Beban (Load Balancing)**:  
+   Kalau pengunjung membludak, proxy bisa membagi tugas: request 1 dikirim ke Backend-1, request 2 dikirim ke Backend-2.
 
-### B. Peruntukan & Skenario di Lomba
-1. **SSL Offloading / Termination**:
-   Beban komputasi berat untuk mengenkripsi/mendekripsi TLS ditangani sepenuhnya oleh Reverse Proxy. Backend cukup melayani HTTP biasa di jaringan privat yang aman, menghemat CPU backend.
-2. **Path-Based Routing**:
-   Routing traffic berdasarkan URL: misal `itnsa.id/api` dialihkan ke LXC Microservice Python, sedangkan `itnsa.id/` dialihkan ke LXC PHP.
-3. **High Availability Simulation**:
-   Juri menguji ketahanan sistem dengan mematikan salah satu node backend. Reverse proxy harus otomatis mengalihkan seluruh traffic ke node cadangan tanpa memunculkan error pada layar pengguna (*passive health check*).
+### 🎯 Kenapa Ada di Soal Lomba?
+Di dunia industri, menaruh server aplikasi dan database langsung ke internet adalah dosa besar keamanan. Juri ingin melihat apakah Anda bisa memisahkan zona publik dan zona privat menggunakan Reverse Proxy.
 
-### C. Titik Kritis & Jebakan Penilaian (Pitfalls)
-- **Infinite Redirect Loop**:
-  Jika reverse proxy mengarahkan HTTPS ke backend HTTP, dan aplikasi di backend memiliki konfigurasi "Force HTTPS", backend akan terus melempar redirect 301 kembali ke proxy karena mengira klien mengaksesnya lewat HTTP biasa. Solusinya: Teruskan header `X-Forwarded-Proto https;` dan `proxy_set_header Host $host;`.
-- **Buffer & Gateway Timeout (504)**:
-  Jika aplikasi backend memerlukan waktu proses data lebih lama dari batas waktu proxy (`proxy_read_timeout`), Nginx proxy akan memutuskan koneksi secara sepihak dan melempar error 504.
+### ⚠️ Jebakan Maut Peserta Pemula
+- **Redirect Loop (Muter-Muter Terus)**:  
+  Proxy mengontak backend lewat HTTP, tapi backend merasa *"Hei, harusnya lewat HTTPS!"*, lalu backend melempar redirect balik ke proxy. Website akhirnya gagal dibuka dan browser menampilkan pesan *Too many redirects*.
+- **Lupa Forward IP**:  
+  Jika lupa memasang header `proxy_set_header X-Real-IP`, catatan log di server belakang akan mencatat semua pengunjung berasal dari IP proxy itu sendiri. Ini membuat poin audit Anda dipotong juri.
 
 ---
 
-## 7. SSL / TLS & Let's Encrypt (Certbot / Offline CA)
+## 6. SSL Let's Encrypt & Certbot
 
-### A. Konsep Fundamental & Cara Kerja *Under the Hood*
-Protokol TLS (Transport Layer Security) menyediakan tiga pilar keamanan: **Kerahasiaan** (Enkripsi simetris data), **Integritas** (HMAC/AEAD mencegah data dimanipulasi di tengah jalan), dan **Otentikasi** (Verifikasi identitas server menggunakan sertifikat digital):
-- **Public Key Infrastructure (PKI) & Chain of Trust**:
-  Browser klien memiliki daftar sertifikat Root CA bawaan yang dipercaya. Server Anda tidak diverifikasi langsung oleh Root CA, melainkan oleh Intermediate CA yang ditandatangani oleh Root CA. Jika rantai sertifikat (*certificate chain*) tidak lengkap di server Anda, browser akan menampilkan peringatan keamanan (*Untrusted Issuer*).
-- **Protokol ACME (Automated Certificate Management Environment)**:
-  Let's Encrypt bekerja tanpa intervensi manusia menggunakan agen otomatis (Certbot) melalui protokol ACME:
-  - **HTTP-01 Challenge**: Server ACME meminta Certbot membuat file token acak di path `http://<domain>/.well-known/acme-challenge/<token>`. Server ACME akan melakukan curl ke URL tersebut via internet. Jika cocok, sertifikat diterbitkan.
-  - **DNS-01 Challenge**: Certbot membuat record DNS tipe `TXT` dengan nama `_acme-challenge.<domain>`. Berguna untuk mendapatkan sertifikat *Wildcard* (`*.itnsa.id`) atau server yang tidak memiliki port 80 publik.
-- **HSTS (HTTP Strict Transport Security)**:
-  Header respons HTTP yang memerintahkan browser agar **selamanya** berkomunikasi hanya menggunakan HTTPS, mencegah serangan *SSL Striping / Man-In-The-Middle*.
+### 🏢 Ibaratnya Apa?
+Ibarat **amplop bersegel lilin resmi atau gembok brankas**.  
+Kalau membuka web lewat `HTTP` biasa, ibarat mengirim surat lewat kartu pos: semua orang di jalan (hacker/penyedia wifi) bisa membaca pesan Anda. Kalau lewat `HTTPS`, surat dimasukkan ke dalam amplop baja anti-tembus pandang yang hanya bisa dibuka oleh si pemilik kunci.
 
-### B. Peruntukan & Skenario di Lomba
-1. **Kepatuhan Protokol Modern**: Mengubah seluruh interaksi web dari port 80 (plaintext) ke port 443 (encrypted) dengan auto-redirect 301 Permanen.
-2. **Kondisi Lab Online vs Offline**:
-   - *Jika Online*: Menggunakan Certbot resmi Let's Encrypt.
-   - *Jika Offline (Kasus Klasik LKS)*: Juri menyiapkan simulasi internet menggunakan server ACME lokal (misal **Pebble** atau **Smallstep Step-CA**), atau menyediakan file Root CA internal. Peserta dituntut mampu:
-     - Mengarahkan Certbot ke endpoint ACME Directory lokal menggunakan flag `--server https://...`
-     - Mengimpor Root CA juri ke trust store OS (`/usr/local/share/ca-certificates/` lalu `update-ca-certificates`) agar curl/testing script tidak melempar error validasi SSL.
+### 🧠 Sebenarnya Ini Apa & Cara Kerjanya?
+- **Sertifikat SSL/TLS**: KTP digital resmi yang membuktikan bahwa website Anda asli dan aman.
+- **Let's Encrypt**: Lembaga internasional yang membagikan sertifikat SSL gratis secara otomatis.
+- **Certbot**: Robot kecil yang kita pasang di server untuk menghubungi Let's Encrypt dan meminta sertifikat secara otomatis.
+- **Tantangan Validasi (HTTP-01 Challenge)**:  
+  Untuk membuktikan Anda benar-benar pemilik domain, robot Let's Encrypt akan mengetes: *"Tolong taruh file rahasia di website kamu di folder `/.well-known/acme-challenge/`. Kalau saya bisa download file itu lewat internet, berarti web itu resmi milikmu!"*.
 
-### C. Titik Kritis & Jebakan Penilaian (Pitfalls)
-- **Path Challenge Terhalang Proxy**:
-  Saat menggunakan HTTP-01 challenge pada server Reverse Proxy, pastikan path `/.well-known/acme-challenge/` tidak dialihkan ke backend sebelum Certbot selesai memvalidasi token.
-- **Menggunakan `cert.pem` alih-alih `fullchain.pem`**:
-  Pada konfigurasi Nginx, mengisi directive `ssl_certificate` dengan `cert.pem` (hanya sertifikat server tanpa intermediate CA) akan menyebabkan script tester otomatis menganggap SSL Anda invalid (*Incomplete Certificate Chain*). Selalu gunakan `fullchain.pem`.
+### 🎯 Kenapa Ada di Soal Lomba?
+Juri ingin memastikan Anda bisa menerapkan keamanan web modern:
+1. Web wajib berjalan di HTTPS (Port 443).
+2. Pengunjung yang mengetik `http://` otomatis dipaksa pindah (*redirect*) ke `https://`.
+3. **Kondisi Lab Offline**: Jika saat lomba tidak ada internet luar, juri biasanya menyediakan server sertifikat tiruan di jaringan lokal (Root CA lokal). Anda harus bisa menyambungkan Certbot ke server lokal juri atau mengimpor sertifikat lokal ke sistem.
+
+### ⚠️ Jebakan Maut Peserta Pemula
+- **Path Challenge Tertutup Proxy**:  
+  Saat Certbot mencoba menaruh file pembuktian, file itu malah dialihkan oleh Reverse Proxy ke backend yang tidak tahu apa-apa, sehingga verifikasi gagal.
+- **Sertifikat Tidak Lengkap (Broken Chain)**:  
+  Salah memilih file sertifikat di Nginx. Mengisi dengan `cert.pem` akan membuat browser memunculkan peringatan merah bahaya; Anda wajib menggunakan `fullchain.pem`.
 
 ---
 
-## 8. Proxmox VE: Arsitektur Virtualisasi & Data Center Tiering
+## 7. Proxmox VE (LXC, Firewall, User Management, Backup, VLAN)
 
-Proxmox Virtual Environment (PVE) adalah hypervisor Type-1 berbasis Debian. Di lomba ITNSA, Proxmox adalah kanvas utama tempat seluruh arsitektur jaringan dibangun.
-
----
-
-### LXC (Linux Containers)
-- **Konsep *Under the Hood***:
-  Berbeda dari KVM/QEMU yang memvirtualisasikan perangkat keras fisik (BIOS, CPU virtual, NIC emulasi) secara penuh, LXC adalah **virtualisasi tingkat kernel**. Container menggunakan kernel Linux milik host Proxmox secara bersamaan, diisolasi menggunakan dua fitur utama kernel Linux:
-  - *cgroups (Control Groups)*: Membatasi penggunaan resource (RAM, CPU, I/O disk).
-  - *namespaces*: Mengisolasi pandangan container terhadap process tree (`pid`), antarmuka jaringan (`net`), mount point storage (`mnt`), dan user ID (`user`).
-- **Unprivileged vs Privileged Container**:
-  - *Unprivileged Container (Default & Rekomendasi Keamanan)*: UID 0 (root) di dalam container di-mapping ke UID non-root (misal UID 100000) di host Proxmox. Jika penyerang berhasil membobol root container, mereka tetap hanya user biasa tanpa hak istimewa di host Proxmox.
-  - *Privileged Container*: UID 0 di dalam container setara dengan UID 0 di host. Hanya digunakan jika container membutuhkan akses langsung ke hardware host atau mount NFS/SMB tertentu.
-- **Peran di Lomba**:
-  LXC digunakan untuk menghemat resource RAM dan CPU pada PC pengujian lomba. Container dapat di-*provisioning* dan di-*boot* dalam hitungan 2–5 detik, memungkinkan pengujian multi-server di hardware terbatas.
+### 🏢 Ibaratnya Apa?
+Ibarat **Gedung Perkantoran Canggih bertingkat banyak**.  
+Alih-alih menyuruh Anda membeli 5 komputer fisik yang boros tempat dan listrik, juri memberikan 1 komputer server fisik besar yang di dalamnya dipasang Proxmox untuk membuat miniatur data center.
 
 ---
 
-### Firewall Multi-Level
-- **Konsep *Under the Hood***:
-  Proxmox Firewall bekerja di atas kernel Netfilter/iptables dan ipset dengan struktur **pewarisan tiga lapis (Hierarchical Inheritance)**:
-  1. *Datacenter Level*: Aturan makro yang berlaku untuk seluruh node cluster dan semua guest VM/CT.
-  2. *Node Level*: Aturan yang melindungi host fisik Proxmox itu sendiri (misal port Web GUI 8006, port cluster corosync 5405).
-  3. *Guest (VM/CT) Level*: Aturan mikrosegmentasi yang terikat pada virtual network interface masing-masing container.
-- **Logika Default Policy (Zero-Trust)**:
-  Standar pengujian keamanan ITNSA mengharuskan penerapan kebijakan default: **Incoming DROP, Outgoing ACCEPT**. Seluruh port masuk tertutup kecuali port layanan yang secara eksplisit diminta dibuka oleh soal (misal port 80, 443, dan 22 dari IP manajemen).
-- **Jebakan Fatal**:
-  Mengaktifkan Firewall di level Datacenter dengan policy incoming DROP sebelum membuat whitelist untuk port 8006 (Web GUI) dan port 22 (SSH) akan **mengunci admin keluar dari server secara permanen (Lockout)**!
+### A. LXC (Linux Containers)
+- **Ibaratnya**: **Kamar Kos Bersekat Partisi**.  
+  Berbeda dari Virtual Machine (VM) penuh yang ibarat membangun rumah mandiri lengkap dari nol (berat, makan RAM 2–4 GB), LXC adalah kamar kos ringan yang menumpang pada satu sistem kernel Proxmox.
+- **Kelebihan di Lomba**: Membuka container LXC cuma butuh 3 detik dan hanya makan RAM 60 MB. Ini sangat membantu agar laptop/PC lomba Anda tidak lambat atau nge-hang saat menjalankan banyak server sekaligus.
+
+### B. VLAN (Virtual LAN)
+- **Ibaratnya**: **Lorong Tertutup dengan Pintu Bersekat Khusus**.  
+  Semua server tercolok ke switch yang sama (`vmbr0`), tapi dengan VLAN kita membagi kabel itu menjadi jalur-jalur rahasia:
+  - *VLAN 10 (Lantai Depan / DMZ)*: Untuk Resepsionis & DNS.
+  - *VLAN 20 (Lantai Belakang / App)*: Untuk Koki Web & Database.
+  - *VLAN 99 (Ruang Kontrol)*: Khusus untuk Admin mengelola Proxmox.  
+  Orang di VLAN 10 tidak akan bisa langsung menyelonong masuk ke VLAN 20 tanpa izin satpam.
+
+### C. Firewall
+- **Ibaratnya**: **Satpam Penjaga Palang Pintu**.  
+  Aturan dasar keamanan: **Tolak Semua Tamu Asing, Kecuali yang Membawa Undangan** (*Policy: DROP*).
+  - Pintu 80 (HTTP) dan 443 (HTTPS) dibuka untuk umum.
+  - Pintu 22 (SSH) dan 8006 (Proxmox GUI) hanya boleh dimasuki oleh komputer laptop juri/admin.
+- **Jebakan Fatal**: Menyalakan firewall dengan aturan tolak (*DROP*) sebelum mengizinkan IP sendiri. Hasilnya: **Anda langsung terkunci di luar server sendiri!**
+
+### D. User Management & Hak Akses
+- **Ibaratnya**: **Kartu ID Card Karyawan vs Tamu**.  
+  Juri tidak boleh memakai akun `root` milik Anda. Juri akan menyuruh Anda membuat akun khusus (misal `juri@pve`):
+  - Diberi peran **PVEAuditor**: Juri cuma boleh mengecek dan melihat-lihat status container.
+  - Tombol hapus, stop, dan edit terkunci agar aman.
+
+### E. Backup (VZDump)
+- **Ibaratnya**: **Mesin Kloning & Brankas Cadangan**.  
+  Mengambil foto cetak biru seluruh isi server secara berkala.
+  - Kalau suatu hari ada hacker merusak server atau Anda salah ketik perintah fatal, tinggal klik tombol *Restore*, dan server langsung pulih seperti sedia kala dalam 1 menit.
+  - **Pruning (Pembersihan)**: Menjaga brankas agar tidak meledak penuh dengan menyetel aturan: *"Simpan hanya 3 file backup terbaru, hapus otomatis backup lama"*.
 
 ---
 
-### User Management & RBAC Privilege
-- **Konsep *Under the Hood***:
-  Proxmox memisahkan otentikasi identitas dan otorisasi wewenang:
-  - **Authentication Realms**:
-    - `pam` (Linux PAM): User yang terdaftar di OS Linux host (`/etc/passwd`).
-    - `pve` (Proxmox VE Authentication): User internal yang disimpan di database cluster `/etc/pve/user.cfg`.
-  - **Role-Based Access Control (RBAC)**:
-    Hak akses dibentuk dari kombinasi tiga elemen:  
-    $$\text{Privilege} \longrightarrow \text{Role} \longrightarrow \text{Path (Objek)}$$
-    - *Path*: Hirarki resource Proxmox, seperti `/` (seluruh datacenter), `/vms` (semua VM/CT), `/vms/101` (hanya CT 101), atau `/storage/local-lvm`.
-    - *Role*: Kumpulan hak istimewa (misal `PVEAuditor` hanya bisa membaca/melihat status, `PVEVMAdmin` bisa mengatur siklus hidup VM).
-- **Peran di Lomba**:
-  Soal lomba sering meminta pembuatan akun khusus juri atau tim pemantau (misal: user `auditor@pve` dengan role `PVEAuditor` yang hanya diizinkan melihat VM di Resource Pool tertentu tanpa izin mematikan atau mengedit konfigurasi).
+## 8. Alur Integrasi: Bagaimana Semuanya Bekerja Bersama?
 
----
-
-### Backup & Disaster Recovery (VZDump)
-- **Konsep *Under the Hood***:
-  Utility `vzdump` membuat arsip terkompresi dari filesystem container:
-  - *Snapshot Mode*: Mengambil backup saat container sedang berjalan tanpa downtime. Data konsisten diambil menggunakan mekanisme write-barrier / copy-on-write.
-  - *Stop Mode*: Mematikan container sementara, membuat tarball backup, lalu menyalakan kembali. Menghasilkan konsistensi data 100% untuk database bertransaksi tinggi, namun menimbulkan downtime.
-  - *Retention / Pruning Policy*: Logika pembersihan backup otomatis (misal: `keep-last=3` hanya menyimpan 3 snapshot terakhir dan otomatis menghapus snapshot ke-4 untuk mencegah disk penuh).
-- **Peran di Lomba**:
-  Menguji kemampuan merancang skenario pemulihan bencana (*Disaster Recovery*). Juri mungkin sengaja merusak salah satu container di akhir sesi dan meminta Anda me-restore service dari file backup terjadwal.
-
----
-
-### VLAN Architecture di Hypervisor
-- **Konsep *Under the Hood***:
-  VLAN (IEEE 802.1Q) menyisipkan 4-byte VLAN Tag pada Ethernet frame untuk memisahkan domain broadcast fisik menjadi beberapa domain broadcast logis (VLAN ID 1–4094):
-  - **Linux Bridge Standar vs VLAN-Aware Bridge**:
-    Secara default, bridge `vmbr0` di Linux bertindak seperti switch unmanaged bodoh yang membuang atau meneruskan paket tanpa memproses tag. Dengan mengaktifkan `bridge-vlan-aware yes`, `vmbr0` berubah menjadi **Virtual Switch Layer 2 yang mendukung 802.1Q Trunking**.
-  - **Access Port pada LXC**:
-    Saat antarmuka virtual container (`veth`) diberi tag (misal `tag=10`), Proxmox secara otomatis memasukkan port tersebut sebagai *Access Port* di VLAN 10. Frame yang keluar dari container akan di-tag dengan ID 10, dan frame yang masuk ke container akan dilepas (*untagged*) tag-nya sehingga container tidak perlu tahu menahu tentang konfigurasi VLAN di level OS-nya.
-- **Peran di Lomba**:
-  Membuat segmentasi jaringan:
-  - `VLAN 10`: DMZ (Public Facing - DNS, Reverse Proxy).
-  - `VLAN 20`: Application / Middleware.
-  - `VLAN 30`: Database / Storage Internal.
-  - `VLAN 99`: Management (Proxmox Web GUI & Out-of-band SSH).
-  Container di VLAN 10 tidak boleh bisa berkomunikasi langsung ke VLAN 30 tanpa melewati router/firewall pengendali.
-
----
-
-## 9. Bedah Skenario & Prediksi Varian Soal Lomba
-
-Berikut tiga pola variasi studi kasus yang paling sering dirilis di LKS ITNSA tingkat Daerah, Nasional, maupun Invitational:
+Biar semakin paham, mari kita lihat apa yang terjadi saat Juri menguji sistem Anda:
 
 ```mermaid
-flowchart TD
-    subgraph PVE ["Proxmox VE Hypervisor"]
-        direction TB
-        subgraph VLAN10 ["VLAN 10: DMZ Zone (192.168.10.0/24)"]
-            CT1["LXC 101: Gateway, DNS (BIND9) & Nginx Reverse Proxy"]
-        end
+sequenceDiagram
+    autonumber
+    actor Juri as Laptop Juri / Script Penguji
+    participant DNS as LXC DNS (BIND9)
+    participant FW as Proxmox Firewall
+    participant Proxy as LXC Reverse Proxy (DMZ - VLAN 10)
+    participant Web as LXC Web Server (App - VLAN 20)
 
-        subgraph VLAN20 ["VLAN 20: App Tier (192.168.20.0/24)"]
-            CT2["LXC 102: Web Application (Nginx + PHP-FPM / Git)"]
-        end
-
-        subgraph VLAN30 ["VLAN 30: Data Tier (192.168.30.0/24)"]
-            CT3["LXC 103: Database (MariaDB/PostgreSQL)"]
-        end
-    end
-
-    Client["Client Tester / Grader"] -->|Port 80/443 HTTPS| CT1
-    CT1 -->|Port 8080 HTTP| CT2
-    CT2 -->|Port 3306 TCP| CT3
-
-    FirewallRule["PVE Firewall: DROP All Cross-VLAN except explicitly allowed"] -.-> VLAN10
-    FirewallRule -.-> VLAN20
-    FirewallRule -.-> VLAN30
+    Juri->>DNS: "Tolong carikan alamat IP untuk app.itnsa.id"
+    DNS-->>Juri: "Alamatnya adalah 192.168.10.10 (IP Proxy)"
+    
+    Juri->>FW: Kirim paket HTTPS (Port 443) ke 192.168.10.10
+    Note over FW: Satpam Firewall mengecek:<br/>Port 443 diizinkan? YA, silakan lewat!
+    FW->>Proxy: Meneruskan paket ke Reverse Proxy
+    
+    Note over Proxy: Membuka gembok SSL (Terminasi HTTPS),<br/>Membaca domain, lalu mengontak backend di VLAN 20
+    Proxy->>Web: Mengambil data via HTTP Port 8080 di VLAN 20
+    Web-->>Proxy: Memberikan konten halaman web
+    
+    Proxy-->>Juri: Mengembalikan halaman web terenkripsi HTTPS (Nilai 100!)
 ```
 
 ---
 
-### Varian 1: "The Secure Multi-Tier Enterprise Delivery" (Format Standar)
-- **Karakteristik Soal**:
-  Fokus pada isolasi VLAN dan pemisahan fungsi node.
-- **Alur Kerja Pengujian Juri**:
-  1. Juri mengakses domain publik `https://portal.lomba.id`.
-  2. DNS lokal harus merespon alamat IP DMZ.
-  3. Reverse Proxy di DMZ menerima koneksi, melakukan terminasi SSL, lalu meneruskan request ke container Web di VLAN internal.
-  4. Container Web mengambil data dari container Database di VLAN Data.
-  5. Juri melakukan penetrasi / scanning dari DMZ ke VLAN Database; koneksi **wajib gagal** karena diblokir oleh Proxmox Firewall.
+## 9. Tebakan Skenario Soal Lomba & Cara Membacanya
 
-### Varian 2: "The Automated GitOps & Continuous Deployment" (Format Modern)
-- **Karakteristik Soal**:
-  Fokus pada siklus hidup aplikasi dan integrasi Git.
-- **Alur Kerja Pengujian Juri**:
-  1. Juri melakukan clone dari repository Git di server, mengubah file teks halaman web, lalu melakukan `git push origin release`.
-  2. Git Hook di server harus otomatis memicu deployment ke direktori web tanpa peserta menyentuh keyboard.
-  3. Reverse Proxy harus langsung menyajikan perubahan tersebut melalui HTTPS dengan sertifikat yang valid.
-  4. Seluruh service harus memiliki backup terjadwal yang otomatis terkompresi di storage target.
+Ketika Anda menerima kertas soal lomba setebal 10 halaman, jangan pusing! Pada dasarnya, soal lomba hanya menceritakan satu cerita sederhana berikut:
 
-### Varian 3: "The Offline Disaster Recovery & System Auditing" (Format Hardening)
-- **Karakteristik Soal**:
-  Lab diisolasi total tanpa internet. Peserta diberikan sertifikat Root CA buatan juri.
-- **Alur Kerja Pengujian Juri**:
-  1. Peserta harus mengimpor Root CA ke seluruh container dan mengonfigurasi Certbot / Web Server agar sertifikat lokal dipercaya sistem.
-  2. Juri membuat user penilaian pada Proxmox (`grader@pve`) yang harus memiliki hak akses auditor saja.
-  3. Juri sengaja menghapus salah satu container, lalu meminta peserta me-restore container tersebut dari arsip `vzdump` dalam waktu maksimal 10 menit dengan IP dan konfigurasi yang persis sama.
-  4. Server di-reboot total untuk menguji apakah seluruh service kembali berjalan normal.
+> **"Skenario Cerita Soal LKS"**:  
+> Perusahaan bernama *ITNSA Corp* ingin membuat sistem web portal yang aman.  
+> 1. Siapkan 1 mesin Proxmox dengan 2 VLAN (VLAN 10 untuk layanan depan, VLAN 20 untuk aplikasi internal).  
+> 2. Buat container ringan (LXC) untuk masing-masing layanan.  
+> 3. Buatkan nama domain kantor menggunakan BIND9 agar web bisa dibuka lewat nama, bukan angka IP.  
+> 4. Taruh Web Server di VLAN 20 yang kodenya ditarik langsung dari Git.  
+> 5. Pasang Reverse Proxy di VLAN 10 agar pengunjung luar tidak bisa menyentuh server web secara langsung.  
+> 6. Pasang gembok sertifikat SSL agar web berjalan di `https://` dan amankan dengan Firewall.  
+> 7. Buatkan akun pengawas untuk Juri, dan jadwalkan backup otomatis setiap malam.  
+> 8. **Tes Terakhir**: Server akan dimatikan (reboot). Semua fungsi di atas harus langsung menyala kembali secara otomatis!
 
 ---
 
-## 10. Framework Problem Solving & Debugging Berbasis OSI Layer
+## 10. Tiga Prinsip Anti-Panik Saat Lomba
 
-Ketika sebuah service gagal bekerja di saat lomba, **jangan panik dan jangan mengubah file konfigurasi secara acak**. Gunakan metode eliminasi lapis demi lapis dari bawah ke atas (Bottom-Up Troubleshooting):
-
-| Layer OSI | Objek yang Diperiksa | Pertanyaan Diagnostik | Tool CLI Diagnostik |
-|---|---|---|---|
-| **Layer 1-2 (Physical/Data Link)** | Bridge, VLAN Tagging, Veth interface | Apakah status antarmuka `UP`? Apakah VLAN-aware aktif di bridge? Apakah ID tag sudah sesuai? | `ip link show`, `bridge vlan show` |
-| **Layer 3 (Network)** | IP Address, Netmask, Routing Table, Gateway | Apakah IP address terpasang? Apakah ada rute default? Apakah bisa ping ke gateway? | `ip addr show`, `ip route show`, `ping -c 2 <gw>` |
-| **Layer 4 (Transport)** | TCP/UDP Port, Firewall Rules, Socket Listening | Apakah port service sedang *LISTEN*? Apakah paket diblokir oleh Firewall Proxmox atau UFW? | `ss -tulpn`, `iptables -L -n -v`, `pve-firewall status` |
-| **Layer 7 (Application)** | Nginx config, BIND9 zones, PHP-FPM, SSL certs | Apakah sintaks konfigurasi valid? Mengapa service crash saat start? Apa kata log error? | `nginx -t`, `named-checkconf`, `journalctl -u <svc> -e` |
-| **Integrasi Client** | DNS Lookup, HTTP Response Code, SSL Handshake | Apakah DNS resolver mengembalikan IP yang benar? Apakah ada error 502/404? Apakah SSL handshake sukses? | `dig @<ip> <domain>`, `curl -Iv https://<domain>`, `openssl s_client -connect ...` |
-
----
-
-> **Aturan Emas Terakhir Menjelang Sesi Berakhir**:  
-> Luangkan **20 menit sebelum waktu lomba habis** untuk melakukan **simulasi reboot total**.  
-> Jalankan `reboot` pada host utama Proxmox. Tunggu hingga semua node menyala kembali, lalu lakukan verifikasi akhir dari sisi klien. Jika ada service yang mati pasca-reboot, perbaiki segera status `systemctl enable` atau file jaringan Netplan Anda!
+1. **Prinsip Mengurutkan Pekerjaan**:  
+   Kerjakan dari **bawah ke atas**:  
+   $\text{VLAN \& Bridge} \rightarrow \text{LXC Container} \rightarrow \text{IP Netplan} \rightarrow \text{DNS} \rightarrow \text{Web \& Git} \rightarrow \text{Proxy \& SSL} \rightarrow \text{Firewall}$.  
+   *(Jangan pernah memasang SSL kalau DNS Anda belum bisa menjawab query domain!)*
+2. **Prinsip Jangan Kunci Diri Sendiri**:  
+   Konfigurasi Firewall selalu dipasang di **tahap paling akhir**, setelah semua web dan service terbukti berjalan lancar.
+3. **Simulasi Reboot 20 Menit Sebelum Selesai**:  
+   Jangan gunakan detik-detik terakhir untuk mengutak-atik hal baru. Luangkan 20 menit untuk mematikan dan menyalakan ulang komputer utama. Pastikan tidak ada yang lupa di-`systemctl enable`!
